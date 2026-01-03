@@ -1,0 +1,397 @@
+# Azure VM Deployment Guide with Guacamole
+
+Introduction
+
+This document provides a complete guide to exporting an Azure VM image, downloading it locally, and redeploying it using Infrastructure-as-Code (IaC). It includes:
+
+Step-by-step instructions for exporting and downloading VM images.
+
+An ARM template (JSON) for deploying a VM with Guacamole, RDP, Nginx + Certbot, and WebSocket support.
+
+A Terraform template (HCL) for deploying the same setup.
+
+Step-by-Step Guide
+
+Export and Download VM Image
+
+Identify the VM’s OS Disk
+
+az vm show 
+  --resource-group <yourResourceGroup> 
+  --name <yourVMName> 
+  --query "storageProfile.osDisk.managedDisk.id" 
+  --output tsv
+
+Grant Export Access
+
+az disk grant-access 
+  --resource-group <yourResourceGroup> 
+  --name <yourDiskName> 
+  --duration-in-seconds 3600 
+  --access-level Read
+
+Download the VHD
+
+azcopy copy "<SAS_URL>" "./myvm.vhd"
+
+Reuse the Image
+
+Upload the VHD back to Azure Storage if needed.
+
+Create a managed disk from the VHD.
+
+Use the disk to create new VMs.
+
+ARM Template (JSON)
+
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "vmName": { "type": "string", "defaultValue": "guac-vm" },
+    "adminUsername": { "type": "string", "defaultValue": "azure-admin" },
+    "adminPassword": { "type": "securestring" },
+    "location": { "type": "string", "defaultValue": "[resourceGroup().location]" },
+    "dnsLabelPrefix": { "type": "string", "defaultValue": "guacdemo" }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2023-09-01",
+      "name": "[parameters('vmName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "hardwareProfile": { "vmSize": "Standard_B2s" },
+        "osProfile": {
+          "computerName": "[parameters('vmName')]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPassword')]",
+          "linuxConfiguration": { "disablePasswordAuthentication": false }
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "Canonical",
+            "offer": "0001-com-ubuntu-server-jammy",
+            "sku": "22_04-lts",
+            "version": "latest"
+          },
+          "osDisk": { "createOption": "FromImage" }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', concat(parameters('vmName'),'-nic'))]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2023-09-01",
+      "name": "[concat(parameters('vmName'), '/installGuacamoleStack')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "publisher": "Microsoft.Azure.Extensions",
+        "type": "CustomScript",
+        "typeHandlerVersion": "2.1",
+        "settings": {
+          "fileUris": [],
+          "commandToExecute": "bash -c 'sudo apt update && sudo apt install -y docker.io docker-compose nginx certbot python3-certbot-nginx xfce4 xfce4-goodies xrdp && sudo systemctl enable xrdp && sudo systemctl start xrdp && git clone https://github.com/apache/guacamole-client.git && cd guacamole-docker && docker-compose up -d && sudo certbot --nginx -d $(hostname -f) --non-interactive --agree-tos -m admin@$(hostname -f)'"
+        }
+      }
+    }
+  ]
+}
+
+Terraform Template (HCL)
+
+provider "azurerm" {
+  features {}
+}
+
+resource "azurerm_resource_group" "rg" {
+  name     = "guac-rg"
+  location = "West US 3"
+}
+
+resource "azurerm_virtual_network" "vnet" {
+  name                = "guac-vnet"
+  address_space       = ["10.0.0.0/16"]
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+}
+
+resource "azurerm_subnet" "subnet" {
+  name                 = "default"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.0.0/24"]
+}
+
+resource "azurerm_public_ip" "pip" {
+  name                = "guac-pip"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  allocation_method   = "Dynamic"
+  domain_name_label   = "guacdemo"
+}
+
+resource "azurerm_network_interface" "nic" {
+  name                = "guac-nic"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.subnet.id
+    private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.pip.id
+  }
+}
+
+resource "azurerm_linux_virtual_machine" "vm" {
+  name                = "guac-vm"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  size                = "Standard_B2s"
+  admin_username      = "azure-admin"
+  admin_password      = "ChangeMe123!"   # replace with secure password
+  disable_password_authentication = false
+
+  network_interface_ids = [azurerm_network_interface.nic.id]
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+  }
+
+  source_image_reference {
+    publisher = "Canonical"
+    offer     = "0001-com-ubuntu-server-jammy"
+    sku       = "22_04-lts"
+    version   = "latest"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "sudo apt update -y",
+      "sudo apt upgrade -y",
+      "sudo apt install -y docker.io docker-compose nginx certbot python3-certbot-nginx xfce4 xfce4-goodies xrdp",
+      "echo startxfce4 > ~/.xsession",
+      "sudo systemctl enable xrdp",
+      "sudo systemctl start xrdp",
+      "git clone https://github.com/apache/guacamole-client.git",
+      "cd guacamole-docker && sudo docker-compose up -d",
+      "sudo certbot --nginx -d guacdemo.westus3.cloudapp.azure.com --non-interactive --agree-tos -m admin@guacdemo.westus3.cloudapp.azure.com"
+    ]
+  }
+}
+
+Conclusion
+
+This document provides everything you need to:
+
+Export and download your VM image locally.
+
+Deploy a new VM with Guacamole, RDP, Nginx + Certbot, and WebSocket support using ARM or Terraform.
+
+Reuse the templates for consistent, repeatable deployments.
+
+Introduction
+
+This document provides a complete guide to exporting an Azure VM image, downloading it locally, and redeploying it using Infrastructure-as-Code (IaC). It includes:
+
+Step-by-step instructions for exporting and downloading VM images.
+
+An ARM template (JSON) for deploying a VM with Guacamole, RDP, Nginx + Certbot, and WebSocket support.
+
+A Terraform template (HCL) for deploying the same setup.
+
+Step-by-Step Guide
+
+Export and Download VM Image
+
+Identify the VM’s OS Disk
+
+az vm show \
+  --resource-group <yourResourceGroup> \
+  --name <yourVMName> \
+  --query "storageProfile.osDisk.managedDisk.id" \
+  --output tsv
+
+Grant Export Access
+
+az disk grant-access \
+  --resource-group <yourResourceGroup> \
+  --name <yourDiskName> \
+  --duration-in-seconds 3600 \
+  --access-level Read
+
+Download the VHD
+
+azcopy copy "<SAS_URL>" "./myvm.vhd"
+
+Reuse the Image
+
+Upload the VHD back to Azure Storage if needed.
+
+Create a managed disk from the VHD.
+
+Use the disk to create new VMs.
+
+ARM Template (JSON)
+
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "vmName": { "type": "string", "defaultValue": "guac-vm" },
+    "adminUsername": { "type": "string", "defaultValue": "azure-admin" },
+    "adminPassword": { "type": "securestring" },
+    "location": { "type": "string", "defaultValue": "[resourceGroup().location]" },
+    "dnsLabelPrefix": { "type": "string", "defaultValue": "guacdemo" }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2023-09-01",
+      "name": "[parameters('vmName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "hardwareProfile": { "vmSize": "Standard_B2s" },
+        "osProfile": {
+          "computerName": "[parameters('vmName')]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPassword')]",
+          "linuxConfiguration": { "disablePasswordAuthentication": false }
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "Canonical",
+            "offer": "0001-com-ubuntu-server-jammy",
+            "sku": "22_04-lts",
+            "version": "latest"
+          },
+          "osDisk": { "createOption": "FromImage" }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', concat(parameters('vmName'),'-nic'))]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2023-09-01",
+      "name": "[concat(parameters('vmName'), '/installGuacamoleStack')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "publisher": "Microsoft.Azure.Extensions",
+        "type": "CustomScript",
+        "typeHandlerVersion": "2.1",
+        "settings": {
+          "fileUris": [],
+          "commandToExecute": "bash -c 'sudo apt update && sudo apt install -y docker.io docker-compose nginx certbot python3-certbot-nginx xfce4 xfce4-goodies xrdp && sudo systemctl enable xrdp && sudo systemctl start xrdp && git clone https://github.com/apache/guacamole-client.git && cd guacamole-docker && docker-compose up -d && sudo certbot --nginx -d $(hostname -f) --non-interactive --agree-tos -m admin@$(hostname -f)'"
+        }
+      }
+    }
+  ]
+}
+
+Terraform Template (HCL)
+
+provider "azurerm" {
+  features {}
+}
+
+resource "azurerm_resource_group" "rg" {
+  name     = "guac-rg"
+  location = "West US 3"
+}
+
+resource "azurerm_virtual_network" "vnet" {
+  name                = "guac-vnet"
+  address_space       = ["10.0.0.0/16"]
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+}
+
+resource "azurerm_subnet" "subnet" {
+  name                 = "default"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.0.0/24"]
+}
+
+resource "azurerm_public_ip" "pip" {
+  name                = "guac-pip"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  allocation_method   = "Dynamic"
+  domain_name_label   = "guacdemo"
+}
+
+resource "azurerm_network_interface" "nic" {
+  name                = "guac-nic"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.subnet.id
+    private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.pip.id
+  }
+}
+
+resource "azurerm_linux_virtual_machine" "vm" {
+  name                = "guac-vm"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  size                = "Standard_B2s"
+  admin_username      = "azure-admin"
+  admin_password      = "ChangeMe123!"   # replace with secure password
+  disable_password_authentication = false
+
+  network_interface_ids = [azurerm_network_interface.nic.id]
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+  }
+
+  source_image_reference {
+    publisher = "Canonical"
+    offer     = "0001-com-ubuntu-server-jammy"
+    sku       = "22_04-lts"
+    version   = "latest"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "sudo apt update -y",
+      "sudo apt upgrade -y",
+      "sudo apt install -y docker.io docker-compose nginx certbot python3-certbot-nginx xfce4 xfce4-goodies xrdp",
+      "echo startxfce4 > ~/.xsession",
+      "sudo systemctl enable xrdp",
+      "sudo systemctl start xrdp",
+      "git clone https://github.com/apache/guacamole-client.git",
+      "cd guacamole-docker && sudo docker-compose up -d",
+      "sudo certbot --nginx -d guacdemo.westus3.cloudapp.azure.com --non-interactive --agree-tos -m admin@guacdemo.westus3.cloudapp.azure.com"
+    ]
+  }
+}
+
+Conclusion
+
+This document provides everything you need to:
+
+Export and download your VM image locally.
+
+Deploy a new VM with Guacamole, RDP, Nginx + Certbot, and WebSocket support using ARM or Terraform.
+
+Reuse the templates for consistent, repeatable deployments.
