@@ -1,0 +1,210 @@
+===========================================================================================
+AGENT Definitions
+===========================================================================================
+#web-search-agent
+===========================================================================================
+metadata:
+  description: ""
+  modified_at: "1765941022"
+object: agent.version
+id: web-search-agent:15
+name: web-search-agent
+version: "15"
+description: ""
+created_at: 1765941023
+definition:
+  kind: prompt
+  model: gpt-5-nano
+  instructions: |-
+    You are an helpful web-search agent. Please find the required answer from web search utilizing the tool. Do not make any answer on your own. Respond in following format.
+
+        info from Web Search:
+        <Summarize the information retrieved for the user query from web, if no relevant content found then respond "No information found in Web"> 
+  tools:
+    - type: mcp
+      server_label: custom_search
+      server_url: http://135.119.90.72:3333/mcp
+      require_approval: never
+      project_connection_id: custom-search
+
+===========================================================================================
+#orchestrator-agent
+===========================================================================================
+metadata: {}
+object: agent.version
+id: orchestrator-agent:8
+name: orchestrator-agent
+version: "8"
+description: ""
+created_at: 1765944309
+definition:
+  kind: prompt
+  model: gpt-4.1-mini
+  instructions: |-
+    Please identify if the Context is fresh user query or Data Agent already tried on the user query or Data and Web-search Agent tried on user query. Depending on that follow the below instruction:
+
+    Criteria 1: If this is a fresh user query then return:
+    Agent-to-call: "Data Agent"
+
+    Criteria 2: If Data Agent has already been invoked and there is a need to call web-search agent for further information:
+    Agent-to-call: "Web-search Agent"
+
+    Criteria 3: If Data Agent has been invoked and user query is fully answered OR  both Data and Web-search agent been invoked:
+    Agent-to-call: "Summarizer Agent"
+
+    Instruction on how to identify the criteria:
+    Criteria 1: Context will have "Info from knowledge source:"
+
+    Criteria 2: Context will have "Info from knowledge source:" and user query is not answered fully.
+
+    Criteria 3: Context will have "Info from knowledge source:" AND "info from Web Search" OR User Query has been answered fully.
+  temperature: 0.7
+  top_p: 1
+  tools: []
+  text:
+    format:
+      type: text
+    verbosity: null
+
+===========================================================================================
+#show-recommendation-agent
+===========================================================================================
+
+
+metadata:
+  logo: Avatar_Default.svg
+  description: ""
+  modified_at: "1766149839"
+object: agent.version
+id: show-recommendation-agent:2
+name: show-recommendation-agent
+version: "2"
+description: ""
+created_at: 1766149840
+definition:
+  kind: prompt
+  model: gpt-5-nano
+  instructions: Given the movie name or details try to get similar movie in the knowledge base and recommend top 3 to the user
+  tools:
+    - type: file_search
+      vector_store_ids:
+        - vs_c4PQxOQKo4ReBdR81TxaUyIV
+
+===========================================================================================
+#demo-tv-shows-qna
+===========================================================================================
+metadata:
+  logo: Avatar_Default.svg
+  description: ""
+  modified_at: "1766174315"
+object: agent.version
+id: demo-tv-shows-qna:4
+name: demo-tv-shows-qna
+version: "4"
+description: ""
+created_at: 1766174316
+definition:
+  kind: prompt
+  model: gpt-5-nano
+  instructions: Please answer queries of the user based on the knowledge source attached to you. Do not answer based on your knowledge or mock up anything. If any information is not found in the knowledge source then reply "No info found in my knowledge base"
+  tools:
+    - type: file_search
+      vector_store_ids:
+        - vs_c4PQxOQKo4ReBdR81TxaUyIV
+
+
+
+
+===========================================================================================
+kind: workflow
+trigger:
+  kind: OnConversationStart
+  id: trigger_wf
+  actions:
+    - kind: SetVariable
+      id: action-1765944511796
+      variable: Local.user_input
+      value: =System.LastMessage
+    - kind: InvokeAzureAgent
+      id: action-1765944576399
+      agent:
+        name: orchestrator-agent
+      input:
+        messages: =Local.user_input
+      output:
+        autoSend: false
+        messages: Local.orchestrator_output
+    - kind: ConditionGroup
+      conditions:
+        - condition: =!IsBlank(Find("DATA AGENT",Upper(Last(Local.orchestrator_output).Text)))
+          actions:
+            - kind: InvokeAzureAgent
+              id: data-agent-action
+              agent:
+                name: tv-show-knowledge-qna
+              input:
+                messages: =Local.user_input
+              output:
+                autoSend: false
+                messages: Local.qna_output
+            - kind: SetVariable
+              id: action-1765946626338
+              variable: Local.user_input
+              value: =Local.qna_output
+          id: if-action-1765944617144-0
+        - condition: =!IsBlank(Find("WEB-SEARCH AGENT",Upper(Last(Local.orchestrator_output).Text)))
+          actions:
+            - kind: InvokeAzureAgent
+              id: web-search-agent-action
+              agent:
+                name: web-search-agent
+              input:
+                messages: =System.LastMessageText
+              output:
+                autoSend: false
+                messages: Local.web_search_output
+            - kind: SetVariable
+              id: action-1765946827888
+              variable: Local.user_input
+              value: =Local.web_search_output
+          id: if-action-1765944617144-oqg060o1
+      id: action-1765944617144
+      elseActions:
+        - kind: SetVariable
+          id: action-1765947358351
+          variable: Local.input_for_summary
+          value: =Concatenate(Last(Local.qna_output).Text,Last(Local.web_search_output).Text)
+        - kind: InvokeAzureAgent
+          id: summary-agent-action
+          agent:
+            name: summarizer-agent
+          input:
+            messages: =Local.input_for_summary
+          output:
+            autoSend: false
+            messages: Local.summary_output
+        - kind: SendActivity
+          activity: |-
+            Here is your answer:
+            ====================
+            {Last(Local.summary_output).Text}
+          id: action-1765944784970
+        - kind: InvokeAzureAgent
+          id: action-1766149930177
+          agent:
+            name: show-recommendation-agent
+          input:
+            messages: =Local.summary_output
+          output:
+            autoSend: true
+        - kind: EndConversation
+          id: action-1765947537736
+    - kind: GotoAction
+      actionId: action-1765944576399
+      id: action-1765945959716
+id: ""
+name: TV-SHOW-ASSITANT-WF
+description: ""
+
+# Sticky Notes
+# STICKY_NOTE: {"id":"sticky_1766201393753_3qxjc9fze","text":"Use Case: TV Show Q&A and Recommendation System\n\nYou are a digital content platform owner, who has taken the details of top 2000 TV shows dataset. Your job is to answer any query related to TV shows if that falls under those 2000 shows, even based on the user question you have to recommend other related shows to the user. \n\nSolution Approach: \nDivide the problem into small simple tasks and use multi-agent workflow to solve the business problem.\n\nOrchestrator Agent:\nResponsible to understand the user query and orchestrate tasks among required other agents to answer user query.\n\nData Agent: Query the knowledge base to identify the show details and send to orchestrator agent\n\nWeb search Agent: The details which could not be answered based on knowledge based, this agent can search in the web and share back to orchestrator agent\n\nSummarizer Agent: Once the query is answered, Summerizer Agent will summarize the response in user friendly manner.\n\nRecommendation Agent: Based on the details of the show user queries, Recommendation Agent will retrieve top 3 similar shows from list of 2000 Top Hollywood shows and recommend to the user\n\nTools Use: Web Search [ MCP Tool], File Search [ Knowledge Base]\n\n\n\n\n\n\n\n","width":482,"height":400,"x":-638,"y":158}
