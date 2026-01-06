@@ -1,0 +1,133 @@
+kind: workflow
+trigger:
+  kind: OnConversationStart
+  id: trigger_wf
+  actions:
+    - kind: SetMultipleVariables
+      id: action-1765944511796
+      assignments:
+        - variable: Local.user_input
+          value: =System.LastMessageText
+        - variable: Local.web_search_agent_output
+          value: =""
+        - variable: Local.show_qna_agent_output
+          value: =""
+        - variable: Local.recommendation_agent_output
+          value: =""
+        - variable: Local.summarizer_agent_output
+          value: =""
+        - variable: Local.updated_response
+          value: =Concatenate("User Query:",System.LastMessageText)
+    - kind: InvokeAzureAgent
+      id: action-1765944576399
+      agent:
+        name: orchestrator-agent
+      input:
+        messages: =Local.updated_response
+      output:
+        autoSend: true
+        messages: Local.orchestrator_output
+    - kind: ConditionGroup
+      conditions:
+        - condition: =!IsBlank(Find("SHOW-QNA-AGENT",Upper(Last(Local.orchestrator_output).Text)))
+          actions:
+            - kind: InvokeAzureAgent
+              id: data-agent-action
+              agent:
+                name: demo-tv-shows-qna
+              input:
+                messages: =Local.user_input
+              output:
+                autoSend: false
+                messages: Local.show_qna_agent_output
+            - kind: SetVariable
+              id: action-1765946626338
+              variable: Local.updated_response
+              value: =Concatenate(Local.updated_response,"Show QnA Agent:", Last(Local.show_qna_agent_output).Text)
+            - kind: SendActivity
+              activity: |-
+                show QnA Updated Response 
+                ---------------
+                Local.updated_response
+              id: action-1767727410534
+          id: if-action-1765944617144-0
+        - condition: =!IsBlank(Find("WEB-SEARCH-AGENT",Upper(Last(Local.orchestrator_output).Text)))
+          actions:
+            - kind: InvokeAzureAgent
+              id: action-1767642300942
+              agent:
+                name: web-search-agent
+              input:
+                messages: =Local.updated_response
+              output:
+                autoSend: true
+                messages: Local.web_search_agent_output
+            - kind: SetVariable
+              id: action-1767723838386
+              variable: Local.updated_response
+              value: =Concatenate(Local.updated_response,"Web Search Agent:", Last(Local.web_search_agent_output).Text)
+            - kind: SendActivity
+              activity: |-
+                show Web Search Updated Response 
+                ---------------
+                Local.updated_response
+              id: action-1767727464744
+          id: if-action-1765944617144-r9vnb0rr
+        - condition: =!IsBlank(Find("RECOMMENDATION-AGENT",Upper(Last(Local.orchestrator_output).Text)))
+          actions:
+            - kind: InvokeAzureAgent
+              id: action-1767723556293
+              agent:
+                name: show-recommendation-agent
+              input:
+                messages: =Local.updated_response
+              output:
+                autoSend: true
+                messages: Local.recommendation_agent_output
+            - kind: SetVariable
+              id: action-1767723872165
+              variable: Local.updated_response
+              value: =Concatenate(Local.updated_response,"Recommendation Agent:", Last(Local.recommendation_agent_output).Text)
+            - kind: SendActivity
+              activity: |-
+                Recommendation Agent Response 
+                ---------------
+                Local.updated_response
+              id: action-1767727481915
+          id: if-action-1765944617144-slq709z5
+        - condition: =!IsBlank(Find("SUMMARIZER-AGENT",Upper(Last(Local.orchestrator_output).Text)))
+          actions:
+            - kind: InvokeAzureAgent
+              id: action-1767723960615
+              agent:
+                name: summarizer-agent
+              input:
+                messages: =Local.updated_response
+              output:
+                autoSend: true
+                messages: Local.summarizer_agent_output
+            - kind: SendActivity
+              activity: |-
+                Here is your answer:
+                ====================
+                {Last(Local.summarizer_agent_output).Text}
+              id: action-1767723994364
+            - kind: EndConversation
+              id: action-1767724004177
+          id: if-action-1765944617144-r77ownaz
+      id: action-1765944617144
+      elseActions:
+        - kind: SendActivity
+          activity: Sorry your query can not be answered.. please try again.
+          id: action-1765944784970
+        - kind: EndConversation
+          id: action-1765947537736
+    - kind: GotoAction
+      actionId: action-1765944576399
+      id: action-1765945959716
+id: ""
+name: show-buzz-wf
+description: ""
+
+# Sticky Notes
+# STICKY_NOTE: {"id":"sticky_1766201393753_3qxjc9fze","text":"Use Case: TV Show Q&A and Recommendation System\n\nYou are a digital content platform owner, who has taken the details of top 2000 TV shows dataset. Your job is to answer any query related to TV shows if that falls under those 2000 shows, even based on the user question you have to recommend other related shows to the user. \n\nSolution Approach: \nDivide the problem into small simple tasks and use multi-agent workflow to solve the business problem.\n\nOrchestrator Agent:\nResponsible to understand the user query and orchestrate tasks among required other agents to answer user query.\n\nData Agent: Query the knowledge base to identify the show details and send to orchestrator agent\n\nWeb search Agent: The details which could not be answered based on knowledge based, this agent can search in the web and share back to orchestrator agent\n\nSummarizer Agent: Once the query is answered, Summerizer Agent will summarize the response in user friendly manner.\n\nRecommendation Agent: Based on the details of the show user queries, Recommendation Agent will retrieve top 3 similar shows from list of 2000 Top Hollywood shows and recommend to the user\n\nTools Use: Web Search [ MCP Tool], File Search [ Knowledge Base]\n\n\n\n\n\n\n\n","width":482,"height":400,"x":-638,"y":158}
